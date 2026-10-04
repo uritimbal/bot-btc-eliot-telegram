@@ -28,8 +28,8 @@ def run_health_server():
 # ==========================================
 # 2. CONFIGURACIÓN Y VARIABLES DE ENTORNO
 # ==========================================
-TELEGRAM_BOT_TOKEN = os.environ.get("8628814558:AAGLpa5sVhcFeLXJ8bkApWiQNxUkJw2hY-Q")
-TELEGRAM_CHAT_ID = os.environ.get("6826848469")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 SYMBOL = "BTCUSDT"
 INTERVAL = "1h"        # Velas de 1 hora
