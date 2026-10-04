@@ -29,7 +29,7 @@ def run_health_server():
 # CONFIGURACIÓN TELEGRAM
 # ==========================================
 # Reemplazá con tu Token nuevo y tu Chat ID
-TELEGRAM_BOT_TOKEN = "8628814558:AAHHOkbClziVXGfZSMXfR2NGs5kCjwAu_nU"
+TELEGRAM_BOT_TOKEN = "8628814558:AAGLpa5sVhcFeLXJ8bkApWiQNxUkJw2hY-Q"
 TELEGRAM_CHAT_ID = "6826848469"
 
 SYMBOL = "BTCUSDT"
