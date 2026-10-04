@@ -64,7 +64,6 @@ def send_telegram_photo(image_bytes, caption=""):
 # 3. PROVEEDORES RESISTENTES A BLOQUEO CLOUD
 # ==========================================
 def fetch_cryptocompare_candles(symbol="BTC", convert="USD", limit=150, aggregate=1):
-    """CryptoCompare: No bloquea IPs de datacenters como Render"""
     try:
         url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={symbol}&tsym={convert}&limit={limit}&aggregate={aggregate}"
         res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
@@ -83,7 +82,6 @@ def fetch_cryptocompare_candles(symbol="BTC", convert="USD", limit=150, aggregat
     return None
 
 def fetch_kraken_candles(pair="XBTUSD", interval=60, limit=150):
-    """Kraken API pública: Excelente tolerancia a peticiones desde la nube"""
     try:
         url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval}"
         res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
@@ -103,17 +101,13 @@ def fetch_kraken_candles(pair="XBTUSD", interval=60, limit=150):
 
 def fetch_candles_with_fallback(timeframe="1H"):
     if timeframe == "1H":
-        # CryptoCompare 1 Hora
         df = fetch_cryptocompare_candles(aggregate=1)
         if df is not None and not df.empty: return df
-        # Kraken 60 min
         df = fetch_kraken_candles(interval=60)
         if df is not None and not df.empty: return df
     elif timeframe == "4H":
-        # CryptoCompare 4 Horas (aggregate=4)
         df = fetch_cryptocompare_candles(aggregate=4)
         if df is not None and not df.empty: return df
-        # Kraken 240 min
         df = fetch_kraken_candles(interval=240)
         if df is not None and not df.empty: return df
     return None
@@ -171,33 +165,32 @@ def detect_structure_and_bos(df, window=4):
 def analyze_market_pro():
     df_1h, df_4h = get_multiframe_data()
     
-    # --- ANÁLISIS MACRO 4H ---
+    # Macro 4H
     df_4h['ema_200'] = df_4h['close'].ewm(span=200, adjust=False).mean()
     macro_close = df_4h['close'].iloc[-1]
     macro_ema200 = df_4h['ema_200'].iloc[-1]
-    
     macro_trend = "ALCISTA 🟢" if macro_close > macro_ema200 else "BAJISTA 🔴"
     
-    # --- ANÁLISIS MICRO 1H ---
+    # Micro 1H
     df_1h['ema_20'] = df_1h['close'].ewm(span=20, adjust=False).mean()
     df_1h['ema_50'] = df_1h['close'].ewm(span=50, adjust=False).mean()
     df_1h['ema_200'] = df_1h['close'].ewm(span=200, adjust=False).mean()
     
-    # RSI (14)
+    # RSI
     delta = df_1h['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / loss
     df_1h['rsi'] = 100 - (100 / (1 + rs))
     
-    # MACD (12, 26, 9)
+    # MACD
     ema12 = df_1h['close'].ewm(span=12, adjust=False).mean()
     ema26 = df_1h['close'].ewm(span=26, adjust=False).mean()
     df_1h['macd'] = ema12 - ema26
     df_1h['macd_sig'] = df_1h['macd'].ewm(span=9, adjust=False).mean()
     df_1h['macd_hist'] = df_1h['macd'] - df_1h['macd_sig']
     
-    # ATR (14)
+    # ATR
     tr = pd.concat([
         df_1h['high'] - df_1h['low'],
         np.abs(df_1h['high'] - df_1h['close'].shift(1)),
@@ -216,7 +209,7 @@ def analyze_market_pro():
     close_p = df_1h['close'].iloc[-1]
     atr_p = df_1h['atr'].iloc[-1]
     
-    # SCORE CUANTITATIVO
+    # Score
     pro_score = 0
     factors = []
     
@@ -245,7 +238,7 @@ def analyze_market_pro():
     elif "BAJISTA" in bos_status: pro_score -= 2
     factors.append(f"• Estructura: {bos_status}")
 
-    # DETERMINACIÓN DE SESGO
+    # Sesgo
     if pro_score >= 5.0:
         signal = "🚀 LONG INSTITUCIONAL (Compra Fuerte)"
         bias = "LONG"
@@ -262,7 +255,7 @@ def analyze_market_pro():
         signal = "🔻 SHORT INSTITUCIONAL (Venta Fuerte)"
         bias = "SHORT"
 
-    # GESTIÓN DE RIESGO
+    # Gestión de Riesgo
     risk_dollars = ACCOUNT_CAPITAL_USD * MAX_RISK_PER_TRADE_PCT
     dist_sl = max(atr_p * 1.8, close_p * 0.01)
     
@@ -278,7 +271,7 @@ def analyze_market_pro():
     btc_position_size = risk_dollars / dist_sl
     pos_usd_val = btc_position_size * close_p
 
-    # MENSAJE TELEGRAM
+    # Mensaje
     factors_text = "\n".join(factors)
     msg = (
         f"🏛 *INFORME CUANTITATIVO PROFESIONAL*\n"
@@ -299,7 +292,7 @@ def analyze_market_pro():
         f"• *Take Profit 2 (R:R 1:3.0):* `${tp2_price:,.2f}`\n"
     )
 
-    # GRAFICACIÓN
+    # Gráfico
     plt.style.use('dark_background')
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 9), gridspec_kw={'height_ratios': [3, 1, 1]}, sharex=True)
 
