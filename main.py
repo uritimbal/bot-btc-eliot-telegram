@@ -150,26 +150,76 @@ def get_market_data():
     raise ValueError("No se pudieron obtener datos de ningún proveedor de mercado.")
 
 # ==========================================
-# 4. ANÁLISIS TÉCNICO Y GRÁFICO
+# 4. ANÁLISIS DE ESTRUCTURA Y ZIGZAG REAL
 # ==========================================
-def find_pivots(df, window=5):
-    df['pivot_high'] = False
-    df['pivot_low'] = False
+def get_clean_pivots(df, window=4):
+    """Detecta pivotes y garantiza alternancia estricta (HIGH -> LOW -> HIGH)."""
+    raw_pivots = []
     for i in range(window, len(df) - window):
         high_range = df['high'].iloc[i-window:i+window+1]
         low_range = df['low'].iloc[i-window:i+window+1]
-        if df['high'].iloc[i] == high_range.max():
-            df.at[df.index[i], 'pivot_high'] = True
-        if df['low'].iloc[i] == low_range.min():
-            df.at[df.index[i], 'pivot_low'] = True
-    return df
+        
+        is_high = df['high'].iloc[i] == high_range.max()
+        is_low = df['low'].iloc[i] == low_range.min()
+        
+        if is_high and not is_low:
+            raw_pivots.append(('HIGH', i, df['high'].iloc[i]))
+        elif is_low and not is_high:
+            raw_pivots.append(('LOW', i, df['low'].iloc[i]))
+            
+    # Filtrar consecutivos del mismo tipo (manteniendo el máximo más alto o mínimo más bajo)
+    clean_pivots = []
+    for p in raw_pivots:
+        if not clean_pivots:
+            clean_pivots.append(p)
+        else:
+            last_type = clean_pivots[-1][0]
+            if p[0] == last_type:
+                if p[0] == 'HIGH' and p[2] > clean_pivots[-1][2]:
+                    clean_pivots[-1] = p
+                elif p[0] == 'LOW' and p[2] < clean_pivots[-1][2]:
+                    clean_pivots[-1] = p
+            else:
+                clean_pivots.append(p)
+    return clean_pivots
 
+def label_market_structure(pivots):
+    """Asigna etiquetas de Estructura de Mercado reales (HH, HL, LH, LL)."""
+    labeled = []
+    last_high = None
+    last_low = None
+    
+    for p_type, idx, price in pivots:
+        label = ""
+        if p_type == 'HIGH':
+            if last_high is None:
+                label = "H"
+            elif price > last_high:
+                label = "HH"  # Higher High
+            else:
+                label = "LH"  # Lower High
+            last_high = price
+        else:
+            if last_low is None:
+                label = "L"
+            elif price > last_low:
+                label = "HL"  # Higher Low
+            else:
+                label = "LL"  # Lower Low
+            last_low = price
+        labeled.append((p_type, idx, price, label))
+    return labeled
+
+# ==========================================
+# 5. ANÁLISIS TÉCNICO Y GENERACIÓN DE GRÁFICO
+# ==========================================
 def analyze_and_send():
     df = get_market_data()
     if df is None or df.empty:
         raise ValueError("DataFrame vacío recibido.")
         
-    df = find_pivots(df, window=5)
+    pivots = get_clean_pivots(df, window=4)
+    structured_pivots = label_market_structure(pivots)
     
     # EMAs 50 y 200
     df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
@@ -187,59 +237,59 @@ def analyze_and_send():
     ema_200_val = df['ema_200'].iloc[-1]
     trend = "BULLISH 🟢 (Sobre EMA 200)" if current_price > ema_200_val else "BEARISH 🔴 (Bajo EMA 200)"
     
-    # Fibonacci
-    high_price = df['high'].max()
-    low_price = df['low'].min()
-    diff = high_price - low_price
-    fib_382 = high_price - 0.382 * diff
-    fib_500 = high_price - 0.500 * diff
-    fib_618 = high_price - 0.618 * diff
+    # Fibonacci sobre el último swing relevante
+    recent_pivots = structured_pivots[-6:] if len(structured_pivots) >= 6 else structured_pivots
+    high_prices = [p[2] for p in recent_pivots if p[0] == 'HIGH']
+    low_prices = [p[2] for p in recent_pivots if p[0] == 'LOW']
     
-    # Pivotes (Ondas de Elliott)
-    pivots = []
-    for idx, row in df.iterrows():
-        if row['pivot_high']:
-            pivots.append(('HIGH', idx, row['high']))
-        elif row['pivot_low']:
-            pivots.append(('LOW', idx, row['low']))
-    recent_pivots = pivots[-5:] if len(pivots) >= 5 else pivots
-
-    # Mensaje de Reporte
+    swing_high = max(high_prices) if high_prices else df['high'].max()
+    swing_low = min(low_prices) if low_prices else df['low'].min()
+    diff = swing_high - swing_low
+    
+    fib_382 = swing_high - 0.382 * diff
+    fib_500 = swing_high - 0.500 * diff
+    fib_618 = swing_high - 0.618 * diff
+    
+    # Construcción de mensaje Telegram
     msg = (
-        f"📊 *REPORTE PROFESIONAL DE MERCADO*\n\n"
+        f"📊 *ANÁLISIS DE ESTRUCTURA DE MERCADO*\n\n"
         f"🪙 *BTC/USDT (Velas 1H)*\n"
         f"💰 *Precio Actual:* ${current_price:,.2f}\n"
         f"📈 *Tendencia Macro:* {trend}\n"
         f"📊 *RSI (14):* {latest_rsi}\n\n"
-        f"📐 *Niveles Fibonacci Clave:*\n"
+        f"📐 *Niveles Fibonacci (Swing Reciente):*\n"
         f"• 0.382: ${fib_382:,.2f}\n"
         f"• 0.500: ${fib_500:,.2f}\n"
-        f"• 0.618 (Golden Pocket): ${fib_618:,.2f}\n"
+        f"• 0.618 (Golden Zone): ${fib_618:,.2f}\n"
     )
 
-    # Gráfico Doble Panel
+    # Gráfico
     plt.style.use('dark_background')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
     
-    # Panel 1: Precio, EMAs, Fib y Elliott
-    ax1.plot(df.index, df['close'], label='BTC/USDT', color='#F7931A', linewidth=1.8)
+    # Panel 1: Precio, EMAs, ZigZag y Estructura
+    ax1.plot(df.index, df['close'], label='BTC/USDT', color='#F7931A', linewidth=1.5, alpha=0.9)
     ax1.plot(df.index, df['ema_50'], label='EMA 50', color='#00E676', linewidth=1, alpha=0.7)
     ax1.plot(df.index, df['ema_200'], label='EMA 200', color='#FF1744', linewidth=1.2, alpha=0.8)
     
-    ax1.axhline(fib_618, color='#FFD700', linestyle='--', alpha=0.9, label=f'Fib 0.618 (${fib_618:,.0f})')
-    ax1.axhline(fib_382, color='#00FFFF', linestyle='--', alpha=0.6, label=f'Fib 0.382 (${fib_382:,.0f})')
+    # Líneas Fibonacci
+    ax1.axhline(fib_618, color='#FFD700', linestyle='--', alpha=0.8, label=f'Fib 0.618 (${fib_618:,.0f})')
+    ax1.axhline(fib_382, color='#00FFFF', linestyle='--', alpha=0.5, label=f'Fib 0.382 (${fib_382:,.0f})')
     
-    pivot_x = [p[1] for p in recent_pivots]
-    pivot_y = [p[2] for p in recent_pivots]
-    if pivot_x:
-        ax1.plot(pivot_x, pivot_y, color='#E040FB', linestyle='-', linewidth=1.5, marker='o', label='Ondas Elliott')
-        wave_names = ['(1)', '(2)', '(3)', '(4)', '(5)']
-        for i, p in enumerate(recent_pivots):
-            label_text = wave_names[i] if i < len(wave_names) else ""
-            ax1.annotate(label_text, (p[1], p[2]), textcoords="offset points", xytext=(0, 10),
-                         ha='center', fontsize=10, color='#FFFF00', weight='bold')
+    # Dibujar ZigZag y Etiquetas de Estructura (HH, HL, LH, LL)
+    if recent_pivots:
+        px = [p[1] for p in recent_pivots]
+        py = [p[2] for p in recent_pivots]
+        ax1.plot(px, py, color='#E040FB', linestyle='-', linewidth=1.8, marker='o', markersize=5, label='Estructura ZigZag')
+        
+        for p_type, idx, price, label in recent_pivots:
+            offset = 12 if p_type == 'HIGH' else -18
+            color_lbl = '#00FF7F' if 'H' in label else '#FF5252'
+            ax1.annotate(f"{label}\n${price:,.0f}", (idx, price), 
+                         textcoords="offset points", xytext=(0, offset),
+                         ha='center', fontsize=8, color=color_lbl, weight='bold')
 
-    ax1.set_title("BTC/USDT - Análisis Elliott, Fibonacci & EMAs", fontsize=12, color='white')
+    ax1.set_title("BTC/USDT - Estructura de Mercado (ZigZag, Pivotes & Fibonacci)", fontsize=12, color='white')
     ax1.legend(loc='upper left', fontsize=8)
     ax1.grid(True, alpha=0.15)
 
@@ -261,19 +311,19 @@ def analyze_and_send():
     send_telegram_photo(buf, caption=msg)
 
 # ==========================================
-# 5. BUCLE PRINCIPAL
+# 6. BUCLE PRINCIPAL
 # ==========================================
 if __name__ == "__main__":
     print("Iniciando servidor Web para Render Free...")
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    send_telegram_message("🚀 *Bot Conectado a Red Antibloqueos*\nConsultando proveedores globales (Coinbase, Bitfinex, Bybit, Binance Vision)...")
+    send_telegram_message("🚀 *Bot de Estructura de Mercado Conectado*")
     
     while True:
         try:
-            print(f"[{time.strftime('%H:%M:%S')}] Ejecutando análisis completo...")
+            print(f"[{time.strftime('%H:%M:%S')}] Ejecutando análisis técnico...")
             analyze_and_send()
-            print(f"[{time.strftime('%H:%M:%S')}] Reporte completo enviado con éxito.")
+            print(f"[{time.strftime('%H:%M:%S')}] Gráfico de estructura enviado exitosamente.")
         except Exception as e:
             print(f"[{time.strftime('%H:%M:%S')}] Error detectado: {e}")
             send_telegram_message(f"⚠ Reintento en el próximo ciclo: `{e}`")
