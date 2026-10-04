@@ -26,15 +26,15 @@ def run_health_server():
     server.serve_forever()
 
 # ==========================================
-# 2. CONFIGURACIÓN, PARAMETROS Y TELEGRAM
+# 2. CONFIGURACIÓN, PARÁMETROS Y TELEGRAM
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-CHECK_INTERVAL = 900  # Evaluacion cada 15 minutos
+CHECK_INTERVAL = 900  # Evaluación cada 15 minutos
 
-# Parametros de Cuenta para Gestion de Riesgo Profesional
+# Parámetros de Cuenta para Gestión de Riesgo Profesional
 ACCOUNT_CAPITAL_USD = 1000.0  # Cuenta simulada/real en USD
-MAX_RISK_PER_TRADE_PCT = 0.015 # Arriesgar maximo 1.5% del capital por operacion
+MAX_RISK_PER_TRADE_PCT = 0.015 # Arriesgar máximo 1.5% del capital por operación
 
 HTTP_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -60,7 +60,7 @@ def send_telegram_photo(image_bytes, caption=""):
     try:
         requests.post(url, data=data, files=files, timeout=15)
     except Exception as e:
-        print(f"Error Enviando Grafico: {e}")
+        print(f"Error Enviando Gráfico: {e}")
 
 # ==========================================
 # 3. OBTENCIÓN DE DATOS MULTITEMPORAL (1H y 4H)
@@ -99,11 +99,16 @@ def fetch_bybit_candles(symbol="BTCUSDT", interval="60", limit=150):
     return None
 
 def get_multiframe_data():
-    """Obtiene datos de 1H (Entrada) y 4H (Tendencia Macro)"""
+    """Obtiene datos de 1H (Entrada) y 4H (Tendencia Macro) con fallback explícito"""
     # 1H Data
-    df_1h = fetch_coinbase_candles(granularity=3600) or fetch_bybit_candles(interval="60")
-    # 4H Data (14400 segundos en Coinbase, "240" en Bybit)
-    df_4h = fetch_coinbase_candles(granularity=14400) or fetch_bybit_candles(interval="240")
+    df_1h = fetch_coinbase_candles(granularity=3600)
+    if df_1h is None or df_1h.empty:
+        df_1h = fetch_bybit_candles(interval="60")
+        
+    # 4H Data (14400s en Coinbase / "240" en Bybit)
+    df_4h = fetch_coinbase_candles(granularity=14400)
+    if df_4h is None or df_4h.empty:
+        df_4h = fetch_bybit_candles(interval="240")
     
     if df_1h is None or df_4h is None or df_1h.empty or df_4h.empty:
         raise ValueError("Error al recuperar datos multitemporales de los proveedores.")
@@ -137,7 +142,6 @@ def detect_structure_and_bos(df, window=4):
         elif is_low and not is_high:
             pivots.append(('LOW', i, df['low'].iloc[i]))
             
-    # Deteccion de BOS en las ultimas velas
     recent_highs = [p[2] for p in pivots if p[0] == 'HIGH']
     recent_lows = [p[2] for p in pivots if p[0] == 'LOW']
     
@@ -157,16 +161,14 @@ def detect_structure_and_bos(df, window=4):
 def analyze_market_pro():
     df_1h, df_4h = get_multiframe_data()
     
-    # --- ANALISIS MACRO 4H (Tendencia Dominante) ---
+    # --- ANÁLISIS MACRO 4H (Tendencia Dominante) ---
     df_4h['ema_200'] = df_4h['close'].ewm(span=200, adjust=False).mean()
-    df_4h['ema_50'] = df_4h['close'].ewm(span=50, adjust=False).mean()
     macro_close = df_4h['close'].iloc[-1]
     macro_ema200 = df_4h['ema_200'].iloc[-1]
-    macro_ema50 = df_4h['ema_50'].iloc[-1]
     
     macro_trend = "ALCISTA 🟢" if macro_close > macro_ema200 else "BAJISTA 🔴"
     
-    # --- ANALISIS MICRO 1H (Entrada y Disparo) ---
+    # --- ANÁLISIS MICRO 1H (Entrada y Disparo) ---
     df_1h['ema_20'] = df_1h['close'].ewm(span=20, adjust=False).mean()
     df_1h['ema_50'] = df_1h['close'].ewm(span=50, adjust=False).mean()
     df_1h['ema_200'] = df_1h['close'].ewm(span=200, adjust=False).mean()
@@ -202,11 +204,9 @@ def analyze_market_pro():
     pivots, bos_status = detect_structure_and_bos(df_1h)
     
     close_p = df_1h['close'].iloc[-1]
-    rsi_p = df_1h['rsi'].iloc[-1]
     atr_p = df_1h['atr'].iloc[-1]
-    macd_hist_p = df_1h['macd_hist'].iloc[-1]
     
-    # --- SONDER CUANTITATIVO MULTIFACTORIAL ---
+    # --- SCORE CUANTITATIVO MULTIFACTORIAL ---
     pro_score = 0
     factors = []
     
@@ -226,7 +226,7 @@ def analyze_market_pro():
     else:
         factors.append(f"• Volumen Promedio (RVOL {rvol:.2f}x)")
         
-    # 3. Posicion respecto al POC de Perfil de Volumen (+/- 1.5 puntos)
+    # 3. Posición respecto al POC de Perfil de Volumen (+/- 1.5 puntos)
     if close_p > poc_price:
         pro_score += 1.5
         factors.append(f"• Precio por encima del POC (${poc_price:,.0f})")
@@ -256,24 +256,23 @@ def analyze_market_pro():
         signal = "🔻 SHORT INSTITUCIONAL (Venta Fuerte)"
         bias = "SHORT"
 
-    # --- CÁLCULO PROFESIONAL DE GESTIÓN DE RIESGO Y TAMAÑO DE POSICIÓN ---
+    # --- CÁLCULO DE GESTIÓN DE RIESGO Y TAMAÑO DE POSICIÓN ---
     risk_dollars = ACCOUNT_CAPITAL_USD * MAX_RISK_PER_TRADE_PCT
-    dist_sl = max(atr_p * 1.8, close_p * 0.01) # Distancia SL basada en ATR
+    dist_sl = max(atr_p * 1.8, close_p * 0.01)
     
     if bias == "LONG":
         sl_price = close_p - dist_sl
         tp1_price = close_p + (dist_sl * 1.5)
-        tp2_price = close_p + (dist_sl * 3.0) # RR 1:3
-    else: # SHORT o NEUTRAL
+        tp2_price = close_p + (dist_sl * 3.0)
+    else:
         sl_price = close_p + dist_sl
         tp1_price = close_p - (dist_sl * 1.5)
         tp2_price = close_p - (dist_sl * 3.0)
 
-    # Formula de posicionamiento profesional: Capital_Riesgo / Distancia_SL_en_puntos
     btc_position_size = risk_dollars / dist_sl
     pos_usd_val = btc_position_size * close_p
 
-    # --- MENSAJE INFORMATIVO PROFESIONAL ---
+    # --- MENSAJE DE TELEGRAM ---
     factors_text = "\n".join(factors)
     msg = (
         f"🏛 *INFORME CUANTITATIVO PROFESIONAL*\n"
@@ -286,7 +285,7 @@ def analyze_market_pro():
         f"⚡ *RVOL (Volumen):* `{rvol:.2f}x` | *ATR (1H):* `${atr_p:,.0f}`\n\n"
         f"🔍 *Factores Institucionales:*\n{factors_text}\n\n"
         f"📐 *PLAN DE EJECUCIÓN Y TAMAÑO DE POSICIÓN:*\n"
-        f"• *Riesgo Maximo por Trade:* `${risk_dollars:,.2f} USD` ({MAX_RISK_PER_TRADE_PCT*100}%)\n"
+        f"• *Riesgo Máximo por Trade:* `${risk_dollars:,.2f} USD` ({MAX_RISK_PER_TRADE_PCT*100}%)\n"
         f"• *Tamaño Sugerido Posición:* `{btc_position_size:.4f} BTC` (~${pos_usd_val:,.2f} USD)\n"
         f"• *Precio Entrada:* `${close_p:,.2f}`\n"
         f"• *Stop Loss (SL):* `${sl_price:,.2f}`\n"
@@ -294,7 +293,7 @@ def analyze_market_pro():
         f"• *Take Profit 2 (R:R 1:3.0):* `${tp2_price:,.2f}`\n"
     )
 
-    # --- GRAFICACIÓN MULTI-PANEL PROFESIONAL ---
+    # --- GRAFICACIÓN MULTI-PANEL ---
     plt.style.use('dark_background')
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 9), gridspec_kw={'height_ratios': [3, 1, 1]}, sharex=True)
 
@@ -304,19 +303,16 @@ def analyze_market_pro():
     ax1.plot(df_1h.index, df_1h['ema_50'], label='EMA 50', color='#00E676', linewidth=1, alpha=0.7)
     ax1.plot(df_1h.index, df_1h['ema_200'], label='EMA 200', color='#FF1744', linewidth=1.2, alpha=0.8)
     
-    # Linea de POC (Perfil de Volumen)
     ax1.axhline(poc_price, color='#FFD700', linestyle='-', linewidth=1.5, alpha=0.8, label=f'POC Vol (${poc_price:,.0f})')
-    
-    # Lineas de Trade Sugerido
     ax1.axhline(sl_price, color='#FF2A6D', linestyle='--', linewidth=1.2, label=f'SL (${sl_price:,.0f})')
     ax1.axhline(tp1_price, color='#05FFA1', linestyle='--', linewidth=1.2, label=f'TP1 (${tp1_price:,.0f})')
     ax1.axhline(tp2_price, color='#00FF66', linestyle=':', linewidth=1.2, label=f'TP2 (${tp2_price:,.0f})')
 
-    ax1.set_title("BTC/USDT - Analisis Cuantitativo de Grado Profesional (Macro 4H + Micro 1H)", fontsize=11, color='white')
+    ax1.set_title("BTC/USDT - Análisis Cuantitativo de Grado Profesional", fontsize=11, color='white')
     ax1.legend(loc='upper left', fontsize=7, ncol=2)
     ax1.grid(True, alpha=0.12)
 
-    # Panel 2: Histograma de Volumen y RVOL
+    # Panel 2: Volumen y RVOL
     v_colors = ['#00E676' if df_1h['close'].iloc[i] >= df_1h['open'].iloc[i] else '#FF1744' for i in range(len(df_1h))]
     ax2.bar(df_1h.index, df_1h['volume'], color=v_colors, alpha=0.6, label='Volumen')
     ax2.plot(df_1h.index, df_1h['vol_ma'], color='#FFD700', linewidth=1.2, label='Vol MA 20')
@@ -349,15 +345,15 @@ if __name__ == "__main__":
     print("Iniciando Servidor Web Health Check...")
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    send_telegram_message("🚀 *Sistema Cuantitativo de Grado Profesional Conectado*")
+    send_telegram_message("🚀 *Sistema Cuantitativo Corregido y Conectado*")
     
     while True:
         try:
-            print(f"[{time.strftime('%H:%M:%S')}] Ejecutando analisis profesional multitemporal...")
+            print(f"[{time.strftime('%H:%M:%S')}] Ejecutando análisis profesional multitemporal...")
             analyze_market_pro()
-            print(f"[{time.strftime('%H:%M:%S')}] Analisis y grafico enviados correctamente.")
+            print(f"[{time.strftime('%H:%M:%S')}] Análisis y gráfico enviados correctamente.")
         except Exception as e:
-            print(f"[{time.strftime('%H:%M:%S')}] Error en analisis: {e}")
-            send_telegram_message(f"⚠ Reintento en el proximo ciclo: `{e}`")
+            print(f"[{time.strftime('%H:%M:%S')}] Error en análisis: {e}")
+            send_telegram_message(f"⚠ Reintento en el próximo ciclo: `{e}`")
         
         time.sleep(CHECK_INTERVAL)
