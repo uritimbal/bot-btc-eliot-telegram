@@ -32,13 +32,11 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 CHECK_INTERVAL = 900  # Evaluación cada 15 minutos
 
-# Parámetros de Cuenta para Gestión de Riesgo Profesional
-ACCOUNT_CAPITAL_USD = 1000.0  # Cuenta simulada/real en USD
-MAX_RISK_PER_TRADE_PCT = 0.015 # Arriesgar máximo 1.5% del capital por operación
+ACCOUNT_CAPITAL_USD = 1000.0
+MAX_RISK_PER_TRADE_PCT = 0.015 
 
 HTTP_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 
 def send_telegram_message(message):
@@ -63,55 +61,69 @@ def send_telegram_photo(image_bytes, caption=""):
         print(f"Error Enviando Gráfico: {e}")
 
 # ==========================================
-# 3. OBTENCIÓN DE DATOS MULTITEMPORAL (1H y 4H)
+# 3. PROVEEDORES RESISTENTES A BLOQUEO CLOUD
 # ==========================================
-def fetch_coinbase_candles(symbol="BTC-USD", granularity=3600, limit=150):
+def fetch_cryptocompare_candles(symbol="BTC", convert="USD", limit=150, aggregate=1):
+    """CryptoCompare: No bloquea IPs de datacenters como Render"""
     try:
-        url = f"https://api.exchange.coinbase.com/products/{symbol}/candles?granularity={granularity}"
+        url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym={symbol}&tsym={convert}&limit={limit}&aggregate={aggregate}"
         res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
         if res.status_code == 200:
             data = res.json()
-            df = pd.DataFrame(data, columns=['timestamp', 'low', 'high', 'open', 'close', 'volume'])
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].astype(float)
-            df = df.sort_values('timestamp').reset_index(drop=True)
-            return df[['open', 'high', 'low', 'close', 'volume']].tail(limit)
-    except Exception:
-        pass
-    return None
-
-def fetch_bybit_candles(symbol="BTCUSDT", interval="60", limit=150):
-    try:
-        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}&interval={interval}&limit={limit}"
-        res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
-        if res.status_code == 200:
-            res_json = res.json()
-            if res_json.get('retCode') == 0:
-                list_data = res_json.get('result', {}).get('list', [])
-                if list_data:
-                    df = pd.DataFrame(list_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            if data.get("Response") == "Success":
+                candles = data.get("Data", {}).get("Data", [])
+                if candles:
+                    df = pd.DataFrame(candles)
+                    df = df[['open', 'high', 'low', 'close', 'volumefrom']].rename(columns={'volumefrom': 'volume'})
                     for col in ['open', 'high', 'low', 'close', 'volume']:
                         df[col] = df[col].astype(float)
-                    df = df.sort_values('timestamp').reset_index(drop=True)
-                    return df[['open', 'high', 'low', 'close', 'volume']]
-    except Exception:
-        pass
+                    return df
+    except Exception as e:
+        print(f"[FETCH ERROR] CryptoCompare: {e}")
+    return None
+
+def fetch_kraken_candles(pair="XBTUSD", interval=60, limit=150):
+    """Kraken API pública: Excelente tolerancia a peticiones desde la nube"""
+    try:
+        url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval}"
+        res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if not data.get("error"):
+                result = data.get("result", {})
+                key = [k for k in result.keys() if k != 'last'][0]
+                raw = result[key]
+                df = pd.DataFrame(raw, columns=['time', 'open', 'high', 'low', 'close', 'vwap', 'volume', 'count'])
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                return df[['open', 'high', 'low', 'close', 'volume']].tail(limit).reset_index(drop=True)
+    except Exception as e:
+        print(f"[FETCH ERROR] Kraken: {e}")
+    return None
+
+def fetch_candles_with_fallback(timeframe="1H"):
+    if timeframe == "1H":
+        # CryptoCompare 1 Hora
+        df = fetch_cryptocompare_candles(aggregate=1)
+        if df is not None and not df.empty: return df
+        # Kraken 60 min
+        df = fetch_kraken_candles(interval=60)
+        if df is not None and not df.empty: return df
+    elif timeframe == "4H":
+        # CryptoCompare 4 Horas (aggregate=4)
+        df = fetch_cryptocompare_candles(aggregate=4)
+        if df is not None and not df.empty: return df
+        # Kraken 240 min
+        df = fetch_kraken_candles(interval=240)
+        if df is not None and not df.empty: return df
     return None
 
 def get_multiframe_data():
-    """Obtiene datos de 1H (Entrada) y 4H (Tendencia Macro) con fallback explícito"""
-    # 1H Data
-    df_1h = fetch_coinbase_candles(granularity=3600)
-    if df_1h is None or df_1h.empty:
-        df_1h = fetch_bybit_candles(interval="60")
-        
-    # 4H Data (14400s en Coinbase / "240" en Bybit)
-    df_4h = fetch_coinbase_candles(granularity=14400)
-    if df_4h is None or df_4h.empty:
-        df_4h = fetch_bybit_candles(interval="240")
+    df_1h = fetch_candles_with_fallback("1H")
+    df_4h = fetch_candles_with_fallback("4H")
     
     if df_1h is None or df_4h is None or df_1h.empty or df_4h.empty:
-        raise ValueError("Error al recuperar datos multitemporales de los proveedores.")
+        raise ValueError("No se pudieron obtener datos de las API institucionales libre de bloqueos.")
         
     return df_1h, df_4h
 
@@ -119,7 +131,6 @@ def get_multiframe_data():
 # 4. MOTOR DE ANÁLISIS TÉCNICO ESTRUCTURAL
 # ==========================================
 def calculate_poc(df, bins=20):
-    """Calcula el Point of Control (POC) - Precio con mayor volumen negociado"""
     price_min = df['low'].min()
     price_max = df['high'].max()
     counts, bin_edges = np.histogram(df['close'], bins=bins, weights=df['volume'], range=(price_min, price_max))
@@ -128,7 +139,6 @@ def calculate_poc(df, bins=20):
     return poc_price
 
 def detect_structure_and_bos(df, window=4):
-    """Detecta Pivotes y Rupturas de Estructura (BOS)"""
     pivots = []
     for i in range(window, len(df) - window):
         high_r = df['high'].iloc[i-window:i+window+1]
@@ -161,14 +171,14 @@ def detect_structure_and_bos(df, window=4):
 def analyze_market_pro():
     df_1h, df_4h = get_multiframe_data()
     
-    # --- ANÁLISIS MACRO 4H (Tendencia Dominante) ---
+    # --- ANÁLISIS MACRO 4H ---
     df_4h['ema_200'] = df_4h['close'].ewm(span=200, adjust=False).mean()
     macro_close = df_4h['close'].iloc[-1]
     macro_ema200 = df_4h['ema_200'].iloc[-1]
     
     macro_trend = "ALCISTA 🟢" if macro_close > macro_ema200 else "BAJISTA 🔴"
     
-    # --- ANÁLISIS MICRO 1H (Entrada y Disparo) ---
+    # --- ANÁLISIS MICRO 1H ---
     df_1h['ema_20'] = df_1h['close'].ewm(span=20, adjust=False).mean()
     df_1h['ema_50'] = df_1h['close'].ewm(span=50, adjust=False).mean()
     df_1h['ema_200'] = df_1h['close'].ewm(span=200, adjust=False).mean()
@@ -187,7 +197,7 @@ def analyze_market_pro():
     df_1h['macd_sig'] = df_1h['macd'].ewm(span=9, adjust=False).mean()
     df_1h['macd_hist'] = df_1h['macd'] - df_1h['macd_sig']
     
-    # ATR (14) - Volatilidad
+    # ATR (14)
     tr = pd.concat([
         df_1h['high'] - df_1h['low'],
         np.abs(df_1h['high'] - df_1h['close'].shift(1)),
@@ -195,22 +205,21 @@ def analyze_market_pro():
     ], axis=1).max(axis=1)
     df_1h['atr'] = tr.rolling(14).mean()
     
-    # Volumen Relativo (RVOL)
+    # RVOL
     df_1h['vol_ma'] = df_1h['volume'].rolling(20).mean()
     rvol = df_1h['volume'].iloc[-1] / df_1h['vol_ma'].iloc[-1]
     
-    # Perfil de Volumen (POC) y Estructura
+    # POC y Estructura
     poc_price = calculate_poc(df_1h)
     pivots, bos_status = detect_structure_and_bos(df_1h)
     
     close_p = df_1h['close'].iloc[-1]
     atr_p = df_1h['atr'].iloc[-1]
     
-    # --- SCORE CUANTITATIVO MULTIFACTORIAL ---
+    # SCORE CUANTITATIVO
     pro_score = 0
     factors = []
     
-    # 1. Filtro Macro 4H (+/- 3 puntos)
     if macro_trend == "ALCISTA 🟢":
         pro_score += 3
         factors.append("• Macro 4H Alcista (Sobre EMA 200 en 4H)")
@@ -218,7 +227,6 @@ def analyze_market_pro():
         pro_score -= 3
         factors.append("• Macro 4H Bajista (Bajo EMA 200 en 4H)")
         
-    # 2. Volumen Institucional RVOL (+/- 2 puntos)
     if rvol >= 1.5:
         factors.append(f"• Volumen Inusualmente Alto (RVOL {rvol:.2f}x)")
         if close_p > df_1h['open'].iloc[-1]: pro_score += 2
@@ -226,7 +234,6 @@ def analyze_market_pro():
     else:
         factors.append(f"• Volumen Promedio (RVOL {rvol:.2f}x)")
         
-    # 3. Posición respecto al POC de Perfil de Volumen (+/- 1.5 puntos)
     if close_p > poc_price:
         pro_score += 1.5
         factors.append(f"• Precio por encima del POC (${poc_price:,.0f})")
@@ -234,12 +241,11 @@ def analyze_market_pro():
         pro_score -= 1.5
         factors.append(f"• Precio por debajo del POC (${poc_price:,.0f})")
         
-    # 4. Estructura BOS (+/- 2 puntos)
     if "ALCISTA" in bos_status: pro_score += 2
     elif "BAJISTA" in bos_status: pro_score -= 2
     factors.append(f"• Estructura: {bos_status}")
 
-    # --- DETERMINACIÓN DEL SESGO INSTITUCIONAL ---
+    # DETERMINACIÓN DE SESGO
     if pro_score >= 5.0:
         signal = "🚀 LONG INSTITUCIONAL (Compra Fuerte)"
         bias = "LONG"
@@ -256,7 +262,7 @@ def analyze_market_pro():
         signal = "🔻 SHORT INSTITUCIONAL (Venta Fuerte)"
         bias = "SHORT"
 
-    # --- CÁLCULO DE GESTIÓN DE RIESGO Y TAMAÑO DE POSICIÓN ---
+    # GESTIÓN DE RIESGO
     risk_dollars = ACCOUNT_CAPITAL_USD * MAX_RISK_PER_TRADE_PCT
     dist_sl = max(atr_p * 1.8, close_p * 0.01)
     
@@ -272,7 +278,7 @@ def analyze_market_pro():
     btc_position_size = risk_dollars / dist_sl
     pos_usd_val = btc_position_size * close_p
 
-    # --- MENSAJE DE TELEGRAM ---
+    # MENSAJE TELEGRAM
     factors_text = "\n".join(factors)
     msg = (
         f"🏛 *INFORME CUANTITATIVO PROFESIONAL*\n"
@@ -293,11 +299,10 @@ def analyze_market_pro():
         f"• *Take Profit 2 (R:R 1:3.0):* `${tp2_price:,.2f}`\n"
     )
 
-    # --- GRAFICACIÓN MULTI-PANEL ---
+    # GRAFICACIÓN
     plt.style.use('dark_background')
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 9), gridspec_kw={'height_ratios': [3, 1, 1]}, sharex=True)
 
-    # Panel 1: Precio, EMAs, POC y Niveles de Trade
     ax1.plot(df_1h.index, df_1h['close'], label='BTC/USDT (1H)', color='#FFFFFF', linewidth=1.2)
     ax1.plot(df_1h.index, df_1h['ema_20'], label='EMA 20', color='#00E5FF', linewidth=1, alpha=0.7)
     ax1.plot(df_1h.index, df_1h['ema_50'], label='EMA 50', color='#00E676', linewidth=1, alpha=0.7)
@@ -312,7 +317,6 @@ def analyze_market_pro():
     ax1.legend(loc='upper left', fontsize=7, ncol=2)
     ax1.grid(True, alpha=0.12)
 
-    # Panel 2: Volumen y RVOL
     v_colors = ['#00E676' if df_1h['close'].iloc[i] >= df_1h['open'].iloc[i] else '#FF1744' for i in range(len(df_1h))]
     ax2.bar(df_1h.index, df_1h['volume'], color=v_colors, alpha=0.6, label='Volumen')
     ax2.plot(df_1h.index, df_1h['vol_ma'], color='#FFD700', linewidth=1.2, label='Vol MA 20')
@@ -320,7 +324,6 @@ def analyze_market_pro():
     ax2.legend(loc='upper left', fontsize=7)
     ax2.grid(True, alpha=0.12)
 
-    # Panel 3: MACD con Histograma
     m_colors = ['#00E676' if v >= 0 else '#FF1744' for v in df_1h['macd_hist']]
     ax3.bar(df_1h.index, df_1h['macd_hist'], color=m_colors, alpha=0.4, label='Hist MACD')
     ax3.plot(df_1h.index, df_1h['macd'], color='#00E5FF', linewidth=1.1, label='MACD')
@@ -345,7 +348,7 @@ if __name__ == "__main__":
     print("Iniciando Servidor Web Health Check...")
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    send_telegram_message("🚀 *Sistema Cuantitativo Corregido y Conectado*")
+    send_telegram_message("🚀 *Sistema Cuantitativo sin Bloqueos Conectado*")
     
     while True:
         try:
