@@ -32,7 +32,6 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 SYMBOL = "BTCUSDT"
-INTERVAL = "1h"        # Velas de 1 hora
 CHECK_INTERVAL = 900   # 15 minutos (900 segundos)
 
 def send_telegram_message(message):
@@ -66,41 +65,64 @@ def send_telegram_photo(image_bytes, caption=""):
         print(f"Error enviando gráfico a Telegram: {e}")
 
 # ==========================================
-# 3. OBTENCIÓN DE DATOS ROBUSTA (MULTINODO)
+# 3. OBTENCIÓN ROBUSTA MULTIMERCADO (BYBIT / CRYPTOCOMPARE / BINANCE)
 # ==========================================
-def get_binance_data(symbol=SYMBOL, interval=INTERVAL, limit=200):
-    endpoints = [
-        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
-        f"https://api1.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
-        f"https://api2.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
-        f"https://api3.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    ]
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
+def get_market_data(symbol="BTCUSDT", limit=200):
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     
-    data = None
-    for url in endpoints:
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                json_res = res.json()
-                if isinstance(json_res, list) and len(json_res) > 0:
-                    data = json_res
-                    break
-        except Exception:
-            continue
-            
-    if not data:
-        raise ValueError("No se pudieron obtener datos de Binance (Servidores no responden o IP limitada).")
+    # Opción 1: Bybit API (Sin restricciones de IP de Render)
+    try:
+        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}&interval=60&limit={limit}"
+        res = requests.get(url, headers=headers, timeout=10)
+        data = res.json()
+        if data.get('retCode') == 0 and 'list' in data.get('result', {}):
+            raw_list = data['result']['list']
+            raw_list.reverse()  # Ordenar cronológicamente
+            df = pd.DataFrame(raw_list, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            if len(df) > 50:
+                print("Datos obtenidos con éxito desde Bybit.")
+                return df
+    except Exception as e:
+        print(f"Bybit no disponible: {e}")
 
-    df = pd.DataFrame(data, columns=[
-        'open_time', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
-    ])
-    for col in ['open', 'high', 'low', 'close', 'volume']:
-        df[col] = df[col].astype(float)
-    return df
+    # Opción 2: CryptoCompare API (Respaldo secundario)
+    try:
+        url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym=BTC&tsym=USDT&limit={limit}"
+        res = requests.get(url, headers=headers, timeout=10)
+        data = res.json()
+        if data.get('Response') == 'Success':
+            hist_data = data['Data']['Data']
+            df = pd.DataFrame(hist_data)
+            df.rename(columns={'volumeto': 'volume'}, inplace=True)
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            if len(df) > 50:
+                print("Datos obtenidos con éxito desde CryptoCompare.")
+                return df
+    except Exception as e:
+        print(f"CryptoCompare no disponible: {e}")
+
+    # Opción 3: Binance API
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit={limit}"
+        res = requests.get(url, headers=headers, timeout=10)
+        data = res.json()
+        if isinstance(data, list) and len(data) > 0:
+            df = pd.DataFrame(data, columns=[
+                'open_time', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
+            ])
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            if len(df) > 50:
+                print("Datos obtenidos con éxito desde Binance.")
+                return df
+    except Exception as e:
+        print(f"Binance no disponible: {e}")
+
+    raise ValueError("No se pudieron obtener datos de ningún proveedor de mercado.")
 
 def find_pivots(df, window=5):
     df['pivot_high'] = False
@@ -120,7 +142,7 @@ def find_pivots(df, window=5):
 # 4. ANÁLISIS COMPLETO Y GENERACIÓN DE GRÁFICO
 # ==========================================
 def analyze_and_send():
-    df = get_binance_data()
+    df = get_market_data()
     if df is None or df.empty:
         raise ValueError("DataFrame vacío recibido.")
         
@@ -225,7 +247,7 @@ if __name__ == "__main__":
     print("Iniciando servidor Web para Render Free...")
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    send_telegram_message("🚀 *Bot Profesional Actualizado*\nConsultando nodos de Binance...")
+    send_telegram_message("🚀 *Bot Conectado a Red Multimercado*\nConsultando nodos de Bybit y CryptoCompare...")
     
     while True:
         try:
