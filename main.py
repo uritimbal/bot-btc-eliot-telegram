@@ -28,8 +28,8 @@ def run_health_server():
 # ==========================================
 # 2. CONFIGURACIÓN Y VARIABLES DE ENTORNO
 # ==========================================
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.environ.get("8628814558:AAGLpa5sVhcFeLXJ8bkApWiQNxUkJw2hY-Q")
+TELEGRAM_CHAT_ID = os.environ.get("6826848469")
 
 SYMBOL = "BTCUSDT"
 INTERVAL = "1h"        # Velas de 1 hora
@@ -66,12 +66,34 @@ def send_telegram_photo(image_bytes, caption=""):
         print(f"Error enviando gráfico a Telegram: {e}")
 
 # ==========================================
-# 3. OBTENCIÓN Y PROCESAMIENTO DE DATOS
+# 3. OBTENCIÓN DE DATOS ROBUSTA (MULTINODO)
 # ==========================================
 def get_binance_data(symbol=SYMBOL, interval=INTERVAL, limit=200):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    res = requests.get(url, timeout=10)
-    data = res.json()
+    endpoints = [
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"https://api1.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"https://api2.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"https://api3.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    ]
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+    
+    data = None
+    for url in endpoints:
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            if res.status_code == 200:
+                json_res = res.json()
+                if isinstance(json_res, list) and len(json_res) > 0:
+                    data = json_res
+                    break
+        except Exception:
+            continue
+            
+    if not data:
+        raise ValueError("No se pudieron obtener datos de Binance (Servidores no responden o IP limitada).")
+
     df = pd.DataFrame(data, columns=[
         'open_time', 'open', 'high', 'low', 'close', 'volume',
         'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
@@ -99,6 +121,9 @@ def find_pivots(df, window=5):
 # ==========================================
 def analyze_and_send():
     df = get_binance_data()
+    if df is None or df.empty:
+        raise ValueError("DataFrame vacío recibido.")
+        
     df = find_pivots(df, window=5)
     
     # Medias Móviles Exponenciales (EMAs)
@@ -200,15 +225,15 @@ if __name__ == "__main__":
     print("Iniciando servidor Web para Render Free...")
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    send_telegram_message("🚀 *Bot Profesional Activado*\nMonitoreando BTC/USDT en Render con análisis completo...")
+    send_telegram_message("🚀 *Bot Profesional Actualizado*\nConsultando nodos de Binance...")
     
     while True:
         try:
             print(f"[{time.strftime('%H:%M:%S')}] Ejecutando análisis completo...")
             analyze_and_send()
-            print(f"[{time.strftime('%H:%M:%S')}] Reporte completo y gráfico enviando con éxito.")
+            print(f"[{time.strftime('%H:%M:%S')}] Reporte completo enviado con éxito.")
         except Exception as e:
-            print(f"[{time.strftime('%H:%M:%S')}] Error detectado y aislado: {e}")
-            send_telegram_message(f"⚠️️ Reintento automático por micro-corte: `{e}`")
+            print(f"[{time.strftime('%H:%M:%S')}] Error detectado: {e}")
+            send_telegram_message(f"⚠ Reintento en el próximo ciclo: `{e}`")
         
         time.sleep(CHECK_INTERVAL)
