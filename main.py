@@ -26,17 +26,20 @@ def run_health_server():
     server.serve_forever()
 
 # ==========================================
-# 2. CONFIGURACIÓN Y VARIABLES DE ENTORNO
+# 2. CONFIGURACIÓN Y TELEGRAM
 # ==========================================
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+CHECK_INTERVAL = 900  # 15 minutos
 
-SYMBOL = "BTCUSDT"
-CHECK_INTERVAL = 900   # 15 minutos (900 segundos)
+HTTP_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json'
+}
 
 def send_telegram_message(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Error: Variables TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID no configuradas.")
+        print("Error: Variables de entorno no configuradas.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -47,7 +50,7 @@ def send_telegram_message(message):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error enviando mensaje a Telegram: {e}")
+        print(f"Error enviando texto a Telegram: {e}")
 
 def send_telegram_photo(image_bytes, caption=""):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -65,82 +68,102 @@ def send_telegram_photo(image_bytes, caption=""):
         print(f"Error enviando gráfico a Telegram: {e}")
 
 # ==========================================
-# 3. OBTENCIÓN ROBUSTA MULTIMERCADO (BYBIT / CRYPTOCOMPARE / BINANCE)
+# 3. OBTENCIÓN DE DATOS ANTIBLOQUEO MULTIPROVEEDOR
 # ==========================================
-def get_market_data(symbol="BTCUSDT", limit=200):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    
-    # Opción 1: Bybit API (Sin restricciones de IP de Render)
+def get_market_data_coinbase(symbol="BTC-USD", limit=150):
+    try:
+        url = f"https://api.exchange.coinbase.com/products/{symbol}/candles?granularity=3600"
+        res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            df = pd.DataFrame(data, columns=['timestamp', 'low', 'high', 'open', 'close', 'volume'])
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            df = df.sort_values('timestamp').reset_index(drop=True)
+            return df[['open', 'high', 'low', 'close', 'volume']].tail(limit)
+    except Exception:
+        pass
+    return None
+
+def get_market_data_bitfinex(symbol="tBTCUSD", limit=150):
+    try:
+        url = f"https://api-pub.bitfinex.com/v2/candles/trade:1h:{symbol}/hist?limit={limit}"
+        res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            df = pd.DataFrame(data, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume'])
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = df[col].astype(float)
+            df = df.sort_values('timestamp').reset_index(drop=True)
+            return df[['open', 'high', 'low', 'close', 'volume']]
+    except Exception:
+        pass
+    return None
+
+def get_market_data_bybit(symbol="BTCUSDT", limit=150):
     try:
         url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}&interval=60&limit={limit}"
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
-        if data.get('retCode') == 0 and 'list' in data.get('result', {}):
-            raw_list = data['result']['list']
-            raw_list.reverse()  # Ordenar cronológicamente
-            df = pd.DataFrame(raw_list, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].astype(float)
-            if len(df) > 50:
-                print("Datos obtenidos con éxito desde Bybit.")
-                return df
-    except Exception as e:
-        print(f"Bybit no disponible: {e}")
+        res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+        if res.status_code == 200:
+            res_json = res.json()
+            if res_json.get('retCode') == 0:
+                list_data = res_json.get('result', {}).get('list', [])
+                if list_data:
+                    df = pd.DataFrame(list_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = df[col].astype(float)
+                    df = df.sort_values('timestamp').reset_index(drop=True)
+                    return df[['open', 'high', 'low', 'close', 'volume']]
+    except Exception:
+        pass
+    return None
 
-    # Opción 2: CryptoCompare API (Respaldo secundario)
+def get_market_data_binance_vision(symbol="BTCUSDT", limit=150):
     try:
-        url = f"https://min-api.cryptocompare.com/data/v2/histohour?fsym=BTC&tsym=USDT&limit={limit}"
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
-        if data.get('Response') == 'Success':
-            hist_data = data['Data']['Data']
-            df = pd.DataFrame(hist_data)
-            df.rename(columns={'volumeto': 'volume'}, inplace=True)
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].astype(float)
-            if len(df) > 50:
-                print("Datos obtenidos con éxito desde CryptoCompare.")
-                return df
-    except Exception as e:
-        print(f"CryptoCompare no disponible: {e}")
-
-    # Opción 3: Binance API
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit={limit}"
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
-        if isinstance(data, list) and len(data) > 0:
+        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval=1h&limit={limit}"
+        res = requests.get(url, headers=HTTP_HEADERS, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
             df = pd.DataFrame(data, columns=[
                 'open_time', 'open', 'high', 'low', 'close', 'volume',
                 'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
             ])
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = df[col].astype(float)
-            if len(df) > 50:
-                print("Datos obtenidos con éxito desde Binance.")
-                return df
-    except Exception as e:
-        print(f"Binance no disponible: {e}")
+            return df[['open', 'high', 'low', 'close', 'volume']]
+    except Exception:
+        pass
+    return None
 
+def get_market_data():
+    providers = [
+        ("Coinbase", get_market_data_coinbase),
+        ("Bitfinex", get_market_data_bitfinex),
+        ("Bybit", get_market_data_bybit),
+        ("Binance Vision", get_market_data_binance_vision)
+    ]
+    for name, provider_func in providers:
+        df = provider_func()
+        if df is not None and not df.empty and len(df) >= 50:
+            print(f"Datos obtenidos con éxito desde {name}.")
+            return df
     raise ValueError("No se pudieron obtener datos de ningún proveedor de mercado.")
 
+# ==========================================
+# 4. ANÁLISIS TÉCNICO Y GRÁFICO
+# ==========================================
 def find_pivots(df, window=5):
     df['pivot_high'] = False
     df['pivot_low'] = False
-    
     for i in range(window, len(df) - window):
         high_range = df['high'].iloc[i-window:i+window+1]
         low_range = df['low'].iloc[i-window:i+window+1]
-        
         if df['high'].iloc[i] == high_range.max():
             df.at[df.index[i], 'pivot_high'] = True
         if df['low'].iloc[i] == low_range.min():
             df.at[df.index[i], 'pivot_low'] = True
     return df
 
-# ==========================================
-# 4. ANÁLISIS COMPLETO Y GENERACIÓN DE GRÁFICO
-# ==========================================
 def analyze_and_send():
     df = get_market_data()
     if df is None or df.empty:
@@ -148,7 +171,7 @@ def analyze_and_send():
         
     df = find_pivots(df, window=5)
     
-    # Medias Móviles Exponenciales (EMAs)
+    # EMAs 50 y 200
     df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
     
@@ -162,26 +185,23 @@ def analyze_and_send():
     current_price = df['close'].iloc[-1]
     latest_rsi = round(df['rsi'].iloc[-1], 2)
     ema_200_val = df['ema_200'].iloc[-1]
-    
     trend = "BULLISH 🟢 (Sobre EMA 200)" if current_price > ema_200_val else "BEARISH 🔴 (Bajo EMA 200)"
     
-    # Niveles de Fibonacci
+    # Fibonacci
     high_price = df['high'].max()
     low_price = df['low'].min()
     diff = high_price - low_price
-    
     fib_382 = high_price - 0.382 * diff
     fib_500 = high_price - 0.500 * diff
     fib_618 = high_price - 0.618 * diff
     
-    # Detección de Pivotes (Ondas de Elliott)
+    # Pivotes (Ondas de Elliott)
     pivots = []
     for idx, row in df.iterrows():
         if row['pivot_high']:
             pivots.append(('HIGH', idx, row['high']))
         elif row['pivot_low']:
             pivots.append(('LOW', idx, row['low']))
-            
     recent_pivots = pivots[-5:] if len(pivots) >= 5 else pivots
 
     # Mensaje de Reporte
@@ -197,11 +217,11 @@ def analyze_and_send():
         f"• 0.618 (Golden Pocket): ${fib_618:,.2f}\n"
     )
 
-    # Generación de Gráfico Doble Panel (Precio + RSI)
+    # Gráfico Doble Panel
     plt.style.use('dark_background')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
     
-    # Panel 1: Precio, EMAs, Fibonacci y Elliott
+    # Panel 1: Precio, EMAs, Fib y Elliott
     ax1.plot(df.index, df['close'], label='BTC/USDT', color='#F7931A', linewidth=1.8)
     ax1.plot(df.index, df['ema_50'], label='EMA 50', color='#00E676', linewidth=1, alpha=0.7)
     ax1.plot(df.index, df['ema_200'], label='EMA 200', color='#FF1744', linewidth=1.2, alpha=0.8)
@@ -241,13 +261,13 @@ def analyze_and_send():
     send_telegram_photo(buf, caption=msg)
 
 # ==========================================
-# 5. EJECUCIÓN CONTINUA E INDESTRUCTIBLE
+# 5. BUCLE PRINCIPAL
 # ==========================================
 if __name__ == "__main__":
     print("Iniciando servidor Web para Render Free...")
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    send_telegram_message("🚀 *Bot Conectado a Red Multimercado*\nConsultando nodos de Bybit y CryptoCompare...")
+    send_telegram_message("🚀 *Bot Conectado a Red Antibloqueos*\nConsultando proveedores globales (Coinbase, Bitfinex, Bybit, Binance Vision)...")
     
     while True:
         try:
