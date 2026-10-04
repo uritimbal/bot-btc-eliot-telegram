@@ -1,286 +1,196 @@
-import os
-import io
 import time
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
-import numpy as np
 import pandas as pd
-
-# CONFIGURACIÓN OBLIGATORIA PARA SERVIDORES EN LA NUBE (HEADLESS)
-import matplotlib
-matplotlib.use('Agg')  # Evita errores de pantalla/GUI en servidores Linux
+import numpy as np
 import matplotlib.pyplot as plt
-
-from datetime import datetime
-
-# ==========================================
-# 1. LECTURA DE VARIABLES DE ENTORNO (NUBE)
-# ==========================================
-TELEGRAM_BOT_TOKEN = os.getenv("8628814558:AAHxYgYFZS5tgD19ZTkhhRm1FkA1XLsUFE4")
-TELEGRAM_CHAT_ID = os.getenv("6826848469")
-
-SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
-HTF = os.getenv("TIMEFRAME_HTF", "4h")   # Trend Macro
-LTF = os.getenv("TIMEFRAME_LTF", "1h")   # Gatillo de entrada
-
-ACCOUNT_CAPITAL = float(os.getenv("ACCOUNT_CAPITAL", "10000.0"))
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.01"))
-MIN_RRR = float(os.getenv("MIN_RRR", "2.0"))
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "300"))  # 5 minutos
-
+import io
 
 # ==========================================
-# 2. CONEXIÓN A API BINANCE
+# SERVIDOR WEB PARA PLAN GRATUITO DE RENDER
 # ==========================================
-def get_klines(symbol: str, interval: str, limit: int = 500) -> pd.DataFrame:
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot activo")
+
+    def log_message(self, format, *args):
+        return
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# ==========================================
+# CONFIGURACIÓN TELEGRAM
+# ==========================================
+# Reemplazá con tu Token nuevo y tu Chat ID
+TELEGRAM_BOT_TOKEN = "8628814558:AAHqfaIYV_6_uN6UV3uisXYmOQN0Bg8baiE"
+TELEGRAM_CHAT_ID = "6826848469"
+
+SYMBOL = "BTCUSDT"
+INTERVAL = "1h"        # Velas de 1 hora
+CHECK_INTERVAL = 900   # Analizar cada 15 minutos (900 segundos)
+
+def send_telegram_message(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Error enviando mensaje: {e}")
+
+def send_telegram_photo(image_bytes, caption=""):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    files = {'photo': ('chart.png', image_bytes, 'image/png')}
+    data = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'caption': caption,
+        'parse_mode': 'Markdown'
+    }
+    try:
+        requests.post(url, data=data, files=files, timeout=15)
+    except Exception as e:
+        print(f"Error enviando gráfico: {e}")
+
+def get_binance_data(symbol=SYMBOL, interval=INTERVAL, limit=120):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     res = requests.get(url, timeout=10)
-    res.raise_for_status()
     data = res.json()
-
     df = pd.DataFrame(data, columns=[
-        'timestamp', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'
+        'open_time', 'open', 'high', 'low', 'close', 'volume',
+        'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
     ])
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = df[col].astype(float)
+    return df
+
+def find_pivots(df, window=4):
+    df['pivot_high'] = False
+    df['pivot_low'] = False
     
-    cols = ['open', 'high', 'low', 'close', 'volume']
-    df[cols] = df[cols].apply(pd.to_numeric, axis=1)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
-
-
-# ==========================================
-# 3. INDICADORES TÉCNICOS
-# ==========================================
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
-    df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
-
-    # RSI (14)
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-
-    # ATR (14)
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    df['atr'] = np.max(ranges, axis=1).rolling(14).mean()
-
-    return df
-
-
-# ==========================================
-# 4. PIVOTES Y FIBONACCI
-# ==========================================
-def find_pivots(df: pd.DataFrame, window: int = 4) -> list:
-    pivots = []
     for i in range(window, len(df) - window):
-        high_win = df['high'].iloc[i - window:i + window + 1]
-        low_win = df['low'].iloc[i - window:i + window + 1]
+        high_range = df['high'].iloc[i-window:i+window+1]
+        low_range = df['low'].iloc[i-window:i+window+1]
+        
+        if df['high'].iloc[i] == high_range.max():
+            df.at[df.index[i], 'pivot_high'] = True
+        if df['low'].iloc[i] == low_range.min():
+            df.at[df.index[i], 'pivot_low'] = True
+    return df
 
-        if df['high'].iloc[i] == high_win.max():
-            pivots.append({
-                'type': 'HIGH',
-                'index': i,
-                'price': df['high'].iloc[i],
-                'timestamp': df['timestamp'].iloc[i],
-                'rsi': df['rsi'].iloc[i]
-            })
-        elif df['low'].iloc[i] == low_win.min():
-            pivots.append({
-                'type': 'LOW',
-                'index': i,
-                'price': df['low'].iloc[i],
-                'timestamp': df['timestamp'].iloc[i],
-                'rsi': df['rsi'].iloc[i]
-            })
-    return pivots
-
-
-def calculate_fib_levels(start_price: float, end_price: float) -> dict:
-    diff = end_price - start_price
-    return {
-        'fib_0500': end_price - (diff * 0.500),
-        'gp_0618': end_price - (diff * 0.618),
-        'gp_0650': end_price - (diff * 0.650),
-        'fib_0786': end_price - (diff * 0.786),
-        'ext_1000': end_price + diff,
-        'ext_1272': end_price + (diff * 1.272),
-        'ext_1618': end_price + (diff * 1.618),
-    }
-
-
-# ==========================================
-# 5. ELLIOTT WAVE EVALUATOR
-# ==========================================
-def evaluate_elliott(df_ltf: pd.DataFrame, df_htf: pd.DataFrame):
-    htf_bullish = df_htf['ema_50'].iloc[-1] > df_htf['ema_200'].iloc[-1]
-    if not htf_bullish:
-        return None
-
-    pivots = find_pivots(df_ltf, window=4)
-    if len(pivots) < 5:
-        return None
-
-    p0, p1, p2, p3, p4 = pivots[-5:]
-    curr_price = df_ltf['close'].iloc[-1]
-    curr_atr = df_ltf['atr'].iloc[-1]
-
-    # Patrón Impulsivo Alcista (0-1-2-3-4)
-    if p0['type'] == 'LOW' and p1['type'] == 'HIGH' and p2['type'] == 'LOW' and p3['type'] == 'HIGH' and p4['type'] == 'LOW':
-        rule1 = p2['price'] > p0['price']
-        rule2 = (p3['price'] - p2['price']) > (p1['price'] - p0['price']) * 0.7
-        rule3 = p4['price'] > p1['price']
-
-        if rule1 and rule2 and rule3:
-            fibs_w3 = calculate_fib_levels(p2['price'], p3['price'])
-            in_golden_pocket = (p4['price'] <= fibs_w3['fib_0500']) and (p4['price'] >= fibs_w3['fib_0786'])
-
-            if in_golden_pocket:
-                confluences = []
-                if p4['rsi'] > p2['rsi'] and p4['price'] < p2['price']:
-                    confluences.append("Divergencia Alcista RSI")
-                elif p4['rsi'] < 42:
-                    confluences.append("RSI en Zona de Soporte/Descompresión")
-
-                if curr_price > df_ltf['ema_50'].iloc[-1]:
-                    confluences.append("Precio sobre EMA 50 LTF")
-
-                stop_loss = round(min(p1['price'], p4['price'] - (1.5 * curr_atr)), 2)
-                tp1 = round(fibs_w3['ext_1000'], 2)
-                tp2 = round(fibs_w3['ext_1272'], 2)
-                tp3 = round(fibs_w3['ext_1618'], 2)
-
-                risk = curr_price - stop_loss
-                reward = tp2 - curr_price
-                rrr = reward / risk if risk > 0 else 0
-
-                if rrr >= MIN_RRR:
-                    position_usd = (ACCOUNT_CAPITAL * RISK_PER_TRADE) / (risk / curr_price)
-                    return {
-                        'price': curr_price,
-                        'stop_loss': stop_loss,
-                        'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
-                        'rrr': round(rrr, 2),
-                        'position_usd': round(position_usd, 2),
-                        'confluences': confluences,
-                        'pivots': [p0, p1, p2, p3, p4],
-                        'fibs': fibs_w3
-                    }
-    return None
-
-
-# ==========================================
-# 6. GRÁFICOS Y NOTIFICACIONES TELEGRAM
-# ==========================================
-def generate_chart(df: pd.DataFrame, setup: dict) -> io.BytesIO:
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
-    fig.patch.set_facecolor('#121212')
-    ax1.set_facecolor('#121212')
-    ax2.set_facecolor('#121212')
-
-    df_tail = df.iloc[-80:].copy()
-    ax1.plot(df_tail['timestamp'], df_tail['close'], color='#00fff0', label='BTC Price', linewidth=1.5)
-    ax1.plot(df_tail['timestamp'], df_tail['ema_50'], color='#ff9900', label='EMA 50', linestyle='--')
-
-    pivots = setup['pivots']
-    p_x = [p['timestamp'] for p in pivots]
-    p_y = [p['price'] for p in pivots]
-    labels = ['(0)', '(1)', '(2)', '(3)', '(4)']
+def analyze_elliott_and_fibonacci():
+    df = get_binance_data()
+    df = find_pivots(df, window=4)
     
-    ax1.plot(p_x, p_y, color='#ffff00', linestyle='-', linewidth=2, marker='o')
-    for i, txt in enumerate(labels):
-        ax1.annotate(txt, (p_x[i], p_y[i]), textcoords="offset points", xytext=(0,8),
-                     ha='center', color='#ffff00', fontweight='bold')
+    current_price = df['close'].iloc[-1]
+    
+    pivots = []
+    for idx, row in df.iterrows():
+        if row['pivot_high']:
+            pivots.append(('HIGH', idx, row['high']))
+        elif row['pivot_low']:
+            pivots.append(('LOW', idx, row['low']))
+    
+    high_price = df['high'].max()
+    low_price = df['low'].min()
+    diff = high_price - low_price
+    
+    fib_236 = high_price - 0.236 * diff
+    fib_382 = high_price - 0.382 * diff
+    fib_500 = high_price - 0.500 * diff
+    fib_618 = high_price - 0.618 * diff
+    fib_786 = high_price - 0.786 * diff
 
-    ax1.axhline(setup['fibs']['gp_0618'], color='#00ff00', linestyle=':', label='Golden Pocket 0.618')
-    ax1.axhline(setup['stop_loss'], color='#ff0000', linestyle='-', label='Stop Loss')
-    ax1.axhline(setup['tp2'], color='#00ffcc', linestyle='-', label='Take Profit 2')
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    latest_rsi = round(rsi.iloc[-1], 2)
+    estado_rsi = "Sobrecompra ⚠️" if latest_rsi > 70 else ("Sobreventa 🟢" if latest_rsi < 30 else "Neutral ⚖️")
 
-    ax1.set_title(f"BTC/USDT - Elliott Wave + Golden Pocket ({LTF})", color='white')
-    ax1.legend(loc='upper left', facecolor='#222222', labelcolor='white')
-    ax1.grid(True, color='#2a2a2a')
-    ax1.tick_params(colors='white')
+    recent_pivots = pivots[-5:] if len(pivots) >= 5 else pivots
+    wave_labels = []
+    
+    if len(recent_pivots) >= 5:
+        wave_names = ['(1)', '(2)', '(3)', '(4)', '(5)']
+        for i, p in enumerate(recent_pivots):
+            wave_labels.append((p[1], p[2], wave_names[i]))
+        estado_elliott = f"Secuencia de 5 Ondas detectada (Último pivote en {recent_pivots[-1][0]})"
+    else:
+        estado_elliott = "Estructura de ondas en formación..."
 
-    ax2.plot(df_tail['timestamp'], df_tail['rsi'], color='#ab47bc')
-    ax2.axhline(70, color='#ff0055', linestyle=':')
-    ax2.axhline(30, color='#00ff00', linestyle=':')
-    ax2.grid(True, color='#2a2a2a')
-    ax2.tick_params(colors='white')
+    msg = (
+        f"🌊 *ANÁLISIS ONDAS DE ELLIOTT & FIBONACCI*\n\n"
+        f"🪙 *Par:* BTC/USDT (1H)\n"
+        f"💰 *Precio Actual:* ${current_price:,.2f}\n"
+        f"📊 *RSI (14):* {latest_rsi} ({estado_rsi})\n"
+        f"🔍 *Estado Elliott:* {estado_elliott}\n\n"
+        f"📐 *Niveles Fibonacci Clave:*\n"
+        f"• 0.236: ${fib_236:,.2f}\n"
+        f"• 0.382: ${fib_382:,.2f}\n"
+        f"• 0.500: ${fib_500:,.2f}\n"
+        f"• 0.618 (Nivel de Oro): ${fib_618:,.2f}\n"
+        f"• 0.786: ${fib_786:,.2f}\n\n"
+        f"🏔️ *Máximo Reciente:* ${high_price:,.2f}\n"
+        f"📉 *Mínimo Reciente:* ${low_price:,.2f}"
+    )
 
-    plt.xticks(rotation=25)
+    plt.style.use('dark_background')
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 7), gridspec_kw={'height_ratios': [3, 1]}, sharex=True)
+    
+    ax1.plot(df.index, df['close'], label='BTC/USDT', color='#F7931A', linewidth=1.8)
+    ax1.axhline(fib_618, color='#FFD700', linestyle='--', alpha=0.8, label=f'Fib 0.618 (${fib_618:,.0f})')
+    ax1.axhline(fib_382, color='#00FFFF', linestyle='--', alpha=0.8, label=f'Fib 0.382 (${fib_382:,.0f})')
+    ax1.axhline(fib_500, color='#00FF00', linestyle=':', alpha=0.6, label=f'Fib 0.500 (${fib_500:,.0f})')
+    
+    pivot_x = [p[1] for p in recent_pivots]
+    pivot_y = [p[2] for p in recent_pivots]
+    if pivot_x:
+        ax1.plot(pivot_x, pivot_y, color='#E040FB', linestyle='-', linewidth=1.5, marker='o', label='Ondas Elliott')
+        for p_idx, p_val, label_text in wave_labels:
+            ax1.annotate(label_text, (p_idx, p_val), textcoords="offset points", xytext=(0, 10),
+                         ha='center', fontsize=11, color='#FFFF00', weight='bold')
+
+    ax1.set_title("BTC/USDT - Análisis de Ondas de Elliott & Fibonacci", fontsize=13, color='white')
+    ax1.legend(loc='upper left', fontsize=9)
+    ax1.grid(True, alpha=0.15)
+
+    ax2.plot(df.index, rsi, color='#9b59b6', linewidth=1.5, label='RSI (14)')
+    ax2.axhline(70, color='#FF5252', linestyle='--', alpha=0.6)
+    ax2.axhline(30, color='#4CAF50', linestyle='--', alpha=0.6)
+    ax2.set_ylabel("RSI", color='white')
+    ax2.set_ylim(0, 100)
+    ax2.grid(True, alpha=0.15)
+
     plt.tight_layout()
 
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100)
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=120)
     buf.seek(0)
     plt.close()
-    return buf
 
-
-def send_telegram(msg: str, buf: io.BytesIO):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-    payload = {'chat_id': TELEGRAM_CHAT_ID, 'caption': msg, 'parse_mode': 'HTML'}
-    files = {'photo': ('chart.png', buf, 'image/png')}
-    try:
-        r = requests.post(url, data=payload, files=files, timeout=15)
-        r.raise_for_status()
-        print(f"[{datetime.now()}] Alerta enviada exitosamente a Telegram.")
-    except Exception as e:
-        print(f"Error enviando a Telegram: {e}")
-
-
-# ==========================================
-# 7. BUCLE PRINCIPAL
-# ==========================================
-def main():
-    print("Iniciando Bot Crypto en la Nube...")
-    last_time = None
-
-    while True:
-        try:
-            df_htf = add_indicators(get_klines(SYMBOL, HTF, 200))
-            df_ltf = add_indicators(get_klines(SYMBOL, LTF, 300))
-
-            setup = evaluate_elliott(df_ltf, df_htf)
-
-            if setup:
-                p_time = setup['pivots'][-1]['timestamp']
-                if last_time != p_time:
-                    msg = f"""
-🚀 <b>ALERTA ELLIOTT WAVE BTC/USDT</b>
-
-<b>Entrada (Market):</b> ${setup['price']:,.2f}
-
-🎯 <b>Niveles de Trading:</b>
-• 🛑 <b>Stop Loss:</b> ${setup['stop_loss']:,.2f}
-• 🎯 <b>Take Profit 1:</b> ${setup['tp1']:,.2f}
-• 🚀 <b>Take Profit 2:</b> ${setup['tp2']:,.2f}
-• 💣 <b>Take Profit 3:</b> ${setup['tp3']:,.2f}
-
-📊 <b>Gestión de Riesgo:</b>
-• <b>RRR:</b> 1:{setup['rrr']}
-• <b>Posición recomendada:</b> ${setup['position_usd']:,.2f} USDT
-
-💡 <b>Confluencias:</b>
-{chr(10).join([f"• {c}" for c in setup['confluences']])}
-"""
-                    chart_buf = generate_chart(df_ltf, setup)
-                    send_telegram(msg, chart_buf)
-                    last_time = p_time
-                else:
-                    print(f"[{datetime.now()}] Patrón ya notificado. Esperando...")
-            else:
-                print(f"[{datetime.now()}] Analizando mercado... Sin patrones en {LTF}.")
-
-        except Exception as e:
-            print(f"Error en bucle: {e}")
-
-        time.sleep(CHECK_INTERVAL)
-
+    send_telegram_photo(buf, caption=msg)
+    print("Análisis Elliott + Fibonacci enviado correctamente.")
 
 if __name__ == "__main__":
-    main()
+    print("Iniciando servidor de puerto para Render Free...")
+    threading.Thread(target=run_health_server, daemon=True).start()
+    
+    print("Iniciando Bot Crypto Elliott + Fibonacci en Render...")
+    send_telegram_message("🤖 *Bot de Ondas de Elliott & Fibonacci iniciado en Render*")
+    while True:
+        try:
+            analyze_elliott_and_fibonacci()
+        except Exception as e:
+            print(f"Error en el ciclo de análisis: {e}")
+        time.sleep(CHECK_INTERVAL)
